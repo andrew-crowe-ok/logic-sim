@@ -40,22 +40,32 @@ You will need the Haskell Toolchain ([GHC and Cabal](https://www.haskell.org/ghc
 ### Running the Simulator
 Clone the repository and run the application using Cabal:
 
- `
+```bash
 git clone https://github.com/andrew-crowe-ok/logic-sim.git
 cd logic-sim
 cabal run logic-sim
- `  
-*Note: Ensure your terminal window is at least 80x40 characters, or the program will halt the boot process to prevent rendering errors.*
+```
+
+*Note: Ensure your terminal window is at least 80x24 characters (supports standard terminals with an adaptive compact mode, expanding to a full 7-segment display layout at 38+ lines).*
+
+### Running the Test Suite
+Execute the exhaustive logic verification suite (verifies gates, adders, two's complement, and all 65,536 ripple-carry combinations):
+
+```bash
+cabal test
+```
 
 ### Keyboard Controls
 The front panel is fully keyboard-driven:
 * **`[Tab]`** : Cycle focus forward (Register A Num -> Reg A Switches -> Reg B Num -> Reg B Switches).
 * **`[b]`** : Cycle focus backward.
+* **`[Left/Right]`** : Move the active switch cursor across bits (Bit 7 <-> Bit 0).
+* **`[Up/Down]`** : Increment / decrement numeric register value, or switch between Reg A & B switch rows.
 * **`[Space]`** : Toggle the currently focused hardware switch.
-* **`[Up/Down]`** : Increment or decrement the decimal value of the focused register.
-* **`[m]`** : Toggle the Arithmetic Mode (Unsigned Addition vs. Signed Two's Complement).
-* **`[h]`** : Cycle the display base (Decimal -> Hexadecimal -> Octal).
-* **`[q]`** : Safely power down the system and exit.
+* **`[m]`** : Toggle Arithmetic Mode (Unsigned Addition vs. Signed Two's Complement).
+* **`[h]`** : Cycle display base (Decimal -> Hexadecimal -> Octal, with full multi-base numeric editing).
+* **`[?]` or `[/]`** : Toggle the in-app Help and Circuit Reference manual.
+* **`[q]` or `[ESC]`** : Safely power down the system and exit.
 </br>
 
 ## 📂 Repository Structure

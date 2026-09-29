@@ -16,8 +16,8 @@ main = do
 
     (w, h) <- getInitialSize
 
-    let minW = 80
-        minH = 40
+    let minW = 76
+        minH = 24
     
     if w < minW || h < minH
         then do

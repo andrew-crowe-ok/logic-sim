@@ -10,7 +10,9 @@ import Layoutz
 import Byte    ( Byte(..), byteToIntUnsigned, byteToIntSigned, int2byteSigned )
 import Bit     ( Bit(..) )
 import Classes ( Arithmetic(add) )
-import Numeric (showHex, showOct)
+import Numeric (showHex, showOct, readHex, readOct)
+import Data.Char (toLower, isDigit, isHexDigit, isOctDigit)
+import Data.List (isPrefixOf)
 import Control.Concurrent (threadDelay)
 import qualified System.Console.Terminal.Size as Term (size, Window(width, height))
 
@@ -33,6 +35,7 @@ data AppModel = AppModel
     , mode           :: AppMode
     , focus          :: Focus
     , displayBase    :: DisplayBase
+    , showHelp       :: Bool
     , frame          :: Int
     , lastInputFrame :: Int
     , termW          :: Int
@@ -57,11 +60,31 @@ getNumericValue :: AppMode -> Byte -> Int
 getNumericValue UnsignedAdd b = byteToIntUnsigned b
 getNumericValue SignedAdd b = byteToIntSigned b
 
+parseNumber :: String -> Maybe Int
+parseNumber raw =
+    let s = dropWhile (== ' ') raw
+        isNeg = "-" `isPrefixOf` s
+        body = if isNeg then drop 1 s else s
+        low = map toLower body
+    in case () of
+        _ | null body -> Just 0
+          | low == "0x" || low == "0o" || low == "x" || low == "o" -> Just 0
+          | "0x" `isPrefixOf` low -> case readHex (drop 2 low) of
+              [(n, "")] -> Just (if isNeg then -n else n)
+              _         -> Nothing
+          | "0o" `isPrefixOf` low -> case readOct (drop 2 low) of
+              [(n, "")] -> Just (if isNeg then -n else n)
+              _         -> Nothing
+          | otherwise -> case reads s :: [(Int, String)] of
+              [(n, "")] -> Just n
+              _         -> case readHex low of
+                  [(n, "")] -> Just (if isNeg then -n else n)
+                  _         -> Nothing
+
 syncFromStr :: String -> Byte
-syncFromStr str =
-    case reads str :: [(Int, String)] of
-        [(n, "")] -> int2byteSigned n
-        _         -> int2byteSigned 0
+syncFromStr str = case parseNumber str of
+    Just n  -> int2byteSigned n
+    Nothing -> int2byteSigned 0
 
 syncFromByte :: AppMode -> DisplayBase -> Byte -> String
 syncFromByte m b base = formatValue b (getNumericValue m base)
@@ -110,10 +133,12 @@ data AppAction
     | Backspace
     | CycleFocusForward
     | CycleFocusBackward
+    | MoveCursor Int
     | AdjustValue Int
     | ToggleSwitch
     | ToggleMode
     | ToggleBase
+    | ToggleHelp
     | AnimTick
     | Quit
 
@@ -125,6 +150,9 @@ handleAction :: AppAction -> AppModel -> (AppModel, Cmd AppAction)
 handleAction action model = case action of
 
     Quit -> (model, CmdExit)
+
+    ToggleHelp ->
+        (model { showHelp = not (showHelp model) }, CmdNone)
 
     AnimTick ->
         let newF = frame model + 1
@@ -166,6 +194,13 @@ handleAction action model = case action of
                 SwB 7 -> NumA
                 SwB i -> SwB (i + 1)
         in (model { focus = prevFocus }, CmdNone)
+
+    MoveCursor delta ->
+        let m' = case focus model of
+                SwA i -> model { focus = SwA (max 0 (min 7 (i + delta))) }
+                SwB i -> model { focus = SwB (max 0 (min 7 (i + delta))) }
+                _     -> model
+        in (m', CmdNone)
 
     ToggleMode ->
         let newMode = if mode model == UnsignedAdd then SignedAdd else UnsignedAdd
@@ -214,6 +249,8 @@ handleAction action model = case action of
                         newByte = int2byteSigned clamped
                         m' = model { byteB = newByte, strB = syncFromByte (mode model) (displayBase model) newByte }
                     in (recordActivity m' "> DATA ENTRY: REG B VALUE SHIFTED", CmdNone)
+            SwA i | delta < 0 -> (model { focus = SwB i }, CmdNone)
+            SwB i | delta > 0 -> (model { focus = SwA i }, CmdNone)
             _    -> (model, CmdNone)
 
     TypeChar c ->
@@ -245,22 +282,33 @@ recordActivity m msg =
 --------------------------------------------------------------------------------
 
 handleSubs :: AppModel -> Sub AppAction
-handleSubs _ = subBatch
+handleSubs model = subBatch
     [ subKeyPress $ \key -> case key of
         KeyChar 'q'  -> Just Quit
-        KeyChar 'm'  -> Just ToggleMode
-        KeyChar ' '  -> Just ToggleSwitch
-        KeyEscape    -> Just Quit
+        KeyEscape    -> if showHelp model then Just ToggleHelp else Just Quit
+        KeyChar '?'  -> Just ToggleHelp
+        KeyChar '/'  | not isNumActive -> Just ToggleHelp
+        KeyChar 'm'  | not isNumActive -> Just ToggleMode
+        KeyChar 'h'  | not isNumActive -> Just ToggleBase
+        KeyChar ' '  | not isNumActive -> Just ToggleSwitch
         KeyTab       -> Just CycleFocusForward
-        KeyChar 'b'  -> Just CycleFocusBackward
-        KeyChar 'h'  -> Just ToggleBase
+        KeyChar 'b'  | not isHexActive -> Just CycleFocusBackward
         KeyBackspace -> Just Backspace
         KeyUp        -> Just (AdjustValue 1)
         KeyDown      -> Just (AdjustValue (-1))
-        KeyChar c | c `elem` ("0123456789-" :: String) -> Just (TypeChar c)
+        KeyLeft      -> Just (MoveCursor 1)
+        KeyRight     -> Just (MoveCursor (-1))
+        KeyChar c    | isValidInputChar c -> Just (TypeChar c)
         _            -> Nothing
     , subEveryMs 100 AnimTick
     ]
+  where
+    isNumActive = focus model `elem` [NumA, NumB]
+    isHexActive = isNumActive && displayBase model == Hex
+    isValidInputChar c = isNumActive && case displayBase model of
+        Hex -> isHexDigit c || toLower c `elem` ("x-" :: String)
+        Oct -> isOctDigit c || toLower c `elem` ("o-" :: String)
+        Dec -> isDigit c || c == '-'
 
 --------------------------------------------------------------------------------
 -- 5. VIEW
@@ -395,79 +443,142 @@ renderSystemLights currentF lastF =
         
     in tightRow [ pwrCol, text "  ", actCol, clkCol ]
 
-renderView :: AppModel -> L
-renderView model =
-    let (Byte bitsA) = byteA model
-        (Byte bitsB) = byteB model
-        isOV = checkOverflow (mode model) (byteA model) (byteB model)
-
-        w = 72
-        centerTxt s = let p = max 0 (w - length s) `div` 2 in replicate p ' ' ++ s ++ replicate (w - length s - p) ' '
-
-        thickDivider = withColor (ColorTrue 50 50 50) $ text (replicate w '▓')
-        
-        busDivider label =
-            let str = "[ " ++ label ++ " ]"
-                remLen = max 0 (w - length str)
-                leftChars = replicate (remLen `div` 2) '═'
-                rightChars = replicate (remLen - (remLen `div` 2)) '═'
-            in withColor (ColorTrue 80 80 80) $ text (leftChars ++ str ++ rightChars)
-
-        renderHeader title =
-            let titleSpacing = "  " ++ title ++ "  "
-                leftBlocks = "███"
-                rightLen = max 0 (w - length titleSpacing - length leftBlocks)
-                rightBlocks = replicate rightLen '█'
-            in tightRow
-               [ withColor (ColorTrue 50 50 50) $ text leftBlocks
-               , withStyle StyleBold $ withColor ColorBrightWhite $ text titleSpacing
-               , withColor (ColorTrue 50 50 50) $ text rightBlocks
-               ]
-
-        ovfLight = if isOV then withStyle StyleBold $ withColor (ColorTrue 255 0 0) (text "● OVF") else withColor (ColorTrue 40 0 0) (text "● OVF")
-
+renderHelpView :: AppModel -> L
+renderHelpView _ =
+    let w = 72
+        thinDivider = withColor (ColorTrue 70 70 70) $ text (replicate w '─')
+        header s = withStyle StyleBold $ withColor ColorBrightWhite $ text s
+        sec s = withStyle StyleBold $ withColor (ColorTrue 0 200 200) $ text s
+        dim s = withColor (ColorTrue 160 160 160) $ text s
+        val s = withColor (ColorTrue 255 176 0) $ text s
+        item k d = tightRow [ text "   ", val k, text (replicate (max 1 (22 - length k)) ' '), dim d ]
     in layout
-    [ pad 1 $ withBorder BorderDouble $ box " (+) ≡≡ VECTRONIX SYSTEMS : MAINFRAME 2000 ≡≡ (+) " $
-        [ tightRow [ text "   ", renderSystemLights (frame model) (lastInputFrame model) ]
-        , text $ centerTxt "MODE SELECTOR"
-        , renderModeSwitch (mode model)
-        
+    [ pad 1 $ withBorder BorderDouble $ box " (+) ≡≡ VECTRONIX SYSTEMS : MAINFRAME MANUAL [?] ≡≡ (+) "
+        [ thinDivider
+        , sec " [ KEYBOARD CONTROLS ]"
+        , item "[Tab] / [b]" "Cycle focus forward / backward"
+        , item "[Left] / [Right]" "Move switch cursor (Bit 7 <-> Bit 0)"
+        , item "[Up] / [Down]" "Adjust numeric value / Switch Reg A <-> B"
+        , item "[Space]" "Toggle currently selected hardware switch"
+        , item "[m]" "Toggle mode: Unsigned (0..255) <-> Signed (-128..127)"
+        , item "[h]" "Cycle display base: Decimal -> Hexadecimal -> Octal"
+        , item "[?] or [/]" "Toggle this Help & Circuit Manual overlay"
+        , item "[q] or [ESC]" "Safely power down system and quit"
         , text " "
-        , busDivider "I/O DATA BUS"
-
-        , renderHeader "REGISTER A"
-        , tightRow [ text "                ", renderBits (frame model) bitsA (decayA model) ]
-        , tightRow [ text "                ", renderSwitches (focus model) "A" bitsA ]
-        ] ++ renderDigitalDisplay (frame model) (focus model == NumA) (strA model) (text " ") ++
-        [ thickDivider
-
-        , renderHeader "REGISTER B"
-        , tightRow [ text "                ", renderBits (frame model) bitsB (decayB model) ]
-        , tightRow [ text "                ", renderSwitches (focus model) "B" bitsB ]
-        ] ++ renderDigitalDisplay (frame model) (focus model == NumB) (strB model) (text " ") ++
-        [ thickDivider
-
-        , renderHeader "ALU ACCUMULATOR"
-        , tightRow [ text "                ", renderAluBits (frame model) (aluDisplayBits model) (decayALU model) ]
-        ] ++ renderDigitalDisplay (frame model) False (formatValue (displayBase model) (getNumericValue (mode model) (Byte (aluDisplayBits model)))) ovfLight ++
-        [ text " "
-        , busDivider "DIAGNOSTIC LOGIC BUS"
-
-        , renderHeader "SYSTEM LOG"
-        ] ++ 
-        ( let linesToRender = if null (logLines model)
-                              then ["> SYSTEM AWAITING INPUT..."]
-                              else reverse (logLines model)
-          in map (\s -> tightRow [ text "    ", withColor (ColorTrue 0 100 0) (text s) ]) linesToRender
-        ) ++
-        [ text " "
-        , renderHeader "STATE MONITOR"
-        , renderStatusBar (focus model) (displayBase model)
+        , thinDivider
+        , sec " [ HARDWARE LOGIC GATES (NAND-Derived First Principles) ]"
+        , tightRow [ text "   ", dim "NAND(A,B) = NOT(A AND B)   | NOT(A)    = NAND(A,A)" ]
+        , tightRow [ text "   ", dim "AND(A,B)  = NOT(NAND(A,B)) | OR(A,B)   = NAND(NOT A, NOT B)" ]
+        , tightRow [ text "   ", dim "XOR(A,B)  = AND(OR(A,B), NAND(A,B))" ]
+        , text " "
+        , thinDivider
+        , sec " [ ARITHMETIC HARDWARE ARCHITECTURE ]"
+        , tightRow [ text "   ", dim "* Half Adder : Sum = A XOR B,  Carry = A AND B" ]
+        , tightRow [ text "   ", dim "* Full Adder : Sum = A XOR B XOR Cin" ]
+        , tightRow [ text "   ", dim "               Cout = (A AND B) OR (Cin AND (A XOR B))" ]
+        , tightRow [ text "   ", dim "* Ripple-Carry: 8-bit chained adder propagating C0..C7" ]
+        , tightRow [ text "   ", dim "* Accumulator : Dynamic LED array with simulated RC bus decay" ]
+        , thinDivider
+        , tightRow [ text "   ", header "Press [?] or [ESC] to return to Front Panel" ]
         ]
-        
-    -- FOOTER
-    , withStyle StyleBold $ withColor ColorBrightWhite $ text "  [Tab] Next | [b] Prev | [Space] Toggle | [m] Mode | [h] Base | [q] Quit"
+    , withStyle StyleBold $ withColor ColorBrightWhite $ text "  [?] Close Manual | [q] Quit"
     ]
+
+renderView :: AppModel -> L
+renderView model
+    | showHelp model = renderHelpView model
+    | otherwise =
+        let (Byte bitsA) = byteA model
+            (Byte bitsB) = byteB model
+            isOV = checkOverflow (mode model) (byteA model) (byteB model)
+            isCompact = termH model < 38
+
+            w = 72
+            centerTxt s = let p = max 0 (w - length s) `div` 2 in replicate p ' ' ++ s ++ replicate (w - length s - p) ' '
+
+            thickDivider = withColor (ColorTrue 50 50 50) $ text (replicate w '▓')
+            
+            busDivider label =
+                let str = "[ " ++ label ++ " ]"
+                    remLen = max 0 (w - length str)
+                    leftChars = replicate (remLen `div` 2) '═'
+                    rightChars = replicate (remLen - (remLen `div` 2)) '═'
+                in withColor (ColorTrue 80 80 80) $ text (leftChars ++ str ++ rightChars)
+
+            renderHeader title =
+                let titleSpacing = "  " ++ title ++ "  "
+                    leftBlocks = "███"
+                    rightLen = max 0 (w - length titleSpacing - length leftBlocks)
+                    rightBlocks = replicate rightLen '█'
+                in tightRow
+                   [ withColor (ColorTrue 50 50 50) $ text leftBlocks
+                   , withStyle StyleBold $ withColor ColorBrightWhite $ text titleSpacing
+                   , withColor (ColorTrue 50 50 50) $ text rightBlocks
+                   ]
+
+            ovfLight = if isOV then withStyle StyleBold $ withColor (ColorTrue 255 0 0) (text "● OVF") else withColor (ColorTrue 40 0 0) (text "● OVF")
+
+            renderCompactVal isFocused valStr ext =
+                let col = if isFocused then ColorTrue 255 176 0 else ColorTrue 180 140 0
+                    cursorChar = if isFocused && (frame model `mod` 10 < 5) then "_" else " "
+                in [ tightRow 
+                       [ text "                "
+                       , withColor (ColorTrue 130 130 130) (text "VALUE: [ ")
+                       , withStyle StyleBold $ withColor col (text (valStr ++ cursorChar))
+                       , withColor (ColorTrue 130 130 130) (text " ]")
+                       , text "    "
+                       , ext
+                       ]
+                   ]
+
+            displayA = if isCompact
+                       then renderCompactVal (focus model == NumA) (strA model) (text " ")
+                       else renderDigitalDisplay (frame model) (focus model == NumA) (strA model) (text " ")
+            displayB = if isCompact
+                       then renderCompactVal (focus model == NumB) (strB model) (text " ")
+                       else renderDigitalDisplay (frame model) (focus model == NumB) (strB model) (text " ")
+            displayALU = if isCompact
+                         then renderCompactVal False (formatValue (displayBase model) (getNumericValue (mode model) (Byte (aluDisplayBits model)))) ovfLight
+                         else renderDigitalDisplay (frame model) False (formatValue (displayBase model) (getNumericValue (mode model) (Byte (aluDisplayBits model)))) ovfLight
+
+            spacingLines = if isCompact then [] else [text " "]
+            logLinesCount = if isCompact then 1 else 3
+            linesToRender = if null (logLines model)
+                            then ["> SYSTEM AWAITING INPUT..."]
+                            else take logLinesCount (reverse (logLines model))
+
+            boxContent =
+                [ tightRow [ text "   ", renderSystemLights (frame model) (lastInputFrame model) ]
+                , text $ centerTxt "MODE SELECTOR"
+                , renderModeSwitch (mode model)
+                ] ++ spacingLines ++
+                [ busDivider "I/O DATA BUS"
+                , renderHeader "REGISTER A"
+                , tightRow [ text "                ", renderBits (frame model) bitsA (decayA model) ]
+                , tightRow [ text "                ", renderSwitches (focus model) "A" bitsA ]
+                ] ++ displayA ++
+                [ thickDivider
+                , renderHeader "REGISTER B"
+                , tightRow [ text "                ", renderBits (frame model) bitsB (decayB model) ]
+                , tightRow [ text "                ", renderSwitches (focus model) "B" bitsB ]
+                ] ++ displayB ++
+                [ thickDivider
+                , renderHeader "ALU ACCUMULATOR"
+                , tightRow [ text "                ", renderAluBits (frame model) (aluDisplayBits model) (decayALU model) ]
+                ] ++ displayALU ++
+                spacingLines ++
+                [ busDivider "DIAGNOSTIC LOGIC BUS"
+                , renderHeader "SYSTEM LOG"
+                ] ++ map (\s -> tightRow [ text "    ", withColor (ColorTrue 0 100 0) (text s) ]) linesToRender ++
+                spacingLines ++
+                [ renderHeader "STATE MONITOR"
+                , renderStatusBar (focus model) (displayBase model)
+                ]
+
+        in layout
+        [ (if isCompact then id else pad 1) $ withBorder BorderDouble $ box " (+) ≡≡ VECTRONIX SYSTEMS : MAINFRAME 2000 ≡≡ (+) " boxContent
+        , withStyle StyleBold $ withColor ColorBrightWhite $ text "  [Tab] Next | [Arrows] Navigate | [Space] Toggle | [m] Mode | [h] Base | [?] Help | [q] Quit"
+        ]
 
 --------------------------------------------------------------------------------
 -- 6. APP RUNNER HELPERS
@@ -490,6 +601,7 @@ logicSimApp w h = LayoutzApp
         , mode           = UnsignedAdd
         , focus          = NumA
         , displayBase    = Dec
+        , showHelp       = False
         , frame          = 0
         , lastInputFrame = 0
         , logLines       = []
