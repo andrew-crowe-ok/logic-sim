@@ -275,7 +275,7 @@ renderBits currentF bits decays = tightRow $ map draw (reverse (zip bits decays)
     rVal  = round $ 177 + (78 * pulse)
 
     draw (One, _) = tightRow [ withColor (ColorTrue 60 60 60) (text " [")
-                             , withStyle StyleBold $ withColor (ColorTrue rVal 0 0) (text "●")
+                             , withStyle StyleBold $ withColor (ColorTrue rVal 0 0) (text "O")
                              , withColor (ColorTrue 60 60 60) (text "] ")
                              ]
     draw (Zero, lastOnF) =
@@ -284,7 +284,7 @@ renderBits currentF bits decays = tightRow $ map draw (reverse (zip bits decays)
                        else if diff == 2 then ColorTrue 90 0 0
                        else ColorTrue 40 0 0
         in tightRow [ withColor (ColorTrue 60 60 60) (text " [")
-                    , withColor ghostCol (text "●")
+                    , withColor ghostCol (text "O")
                     , withColor (ColorTrue 60 60 60) (text "] ")
                     ]
 
@@ -297,7 +297,7 @@ renderAluBits currentF bits decays = tightRow $ map draw (reverse (zip bits deca
     gVal  = round $ 177 + (78 * pulse)
 
     draw (One, _) = tightRow [ withColor (ColorTrue 60 60 60) (text " [")
-                             , withStyle StyleBold $ withColor (ColorTrue 0 gVal 0) (text "⬤")
+                             , withStyle StyleBold $ withColor (ColorTrue 0 gVal 0) (text "O")
                              , withColor (ColorTrue 60 60 60) (text "] ")
                              ]
     draw (Zero, lastOnF) =
@@ -306,7 +306,7 @@ renderAluBits currentF bits decays = tightRow $ map draw (reverse (zip bits deca
                        else if diff == 2 then ColorTrue 0 90 0
                        else ColorTrue 0 40 0
         in tightRow [ withColor (ColorTrue 60 60 60) (text " [")
-                    , withColor ghostCol (text "⬤")
+                    , withColor ghostCol (text "O")
                     , withColor (ColorTrue 60 60 60) (text "] ")
                     ]
 
