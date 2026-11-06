@@ -1,12 +1,18 @@
 module Main where
 
 import System.Exit (exitFailure, exitSuccess)
-import Bit
-import Byte
-import Circuits
-import qualified Gates as G
-import Classes
-import Memory
+import LogicSim.Core.Bit (Bit(..))
+import LogicSim.Core.Word8
+    ( Word8(..)
+    , word8ToIntUnsigned
+    , word8ToIntSigned
+    , intToWord8
+    , negateWord8
+    )
+import LogicSim.Combinational.Circuits (halfAdder, fullAdder)
+import qualified LogicSim.Combinational.Gates as G
+import LogicSim.Core.Classes (Arithmetic(..), Sequential(..))
+import LogicSim.Sequential.Memory (SrLatch(..), DFlipFlop(..), Register8(..))
 
 main :: IO ()
 main = do
@@ -98,65 +104,65 @@ verifyCircuits = do
 verifyBytes :: IO ()
 verifyBytes = do
     -- Roundtrip signed integers [-128..127]
-    let signedOk = and [ byteToIntSigned (int2byteSigned n) == n | n <- [-128..127] ]
-    assert "Roundtrip int2byteSigned <-> byteToIntSigned for all [-128..127]" signedOk
+    let signedOk = and [ word8ToIntSigned (intToWord8 n) == n | n <- [-128..127] ]
+    assert "Roundtrip intToWord8 <-> word8ToIntSigned for all [-128..127]" signedOk
 
     -- Negation property: -(-x) == x for x in [-127..127] (standard two's complement)
-    let negOk = and [ byteToIntSigned (negateByte (negateByte (int2byteSigned n))) == n | n <- [-127..127] ]
-    assert "Double negation: negateByte (negateByte x) == x for all [-127..127]" negOk
+    let negOk = and [ word8ToIntSigned (negateWord8 (negateWord8 (intToWord8 n))) == n | n <- [-127..127] ]
+    assert "Double negation: negateWord8 (negateWord8 x) == x for all [-127..127]" negOk
 
     -- Unsigned interpretation: zero and positive ranges
-    assert "byteToIntUnsigned (int2byteSigned 0) == 0" (byteToIntUnsigned (int2byteSigned 0) == 0)
-    assert "byteToIntUnsigned (int2byteSigned 127) == 127" (byteToIntUnsigned (int2byteSigned 127) == 127)
-    assert "byteToIntUnsigned (int2byteSigned (-1)) == 255" (byteToIntUnsigned (int2byteSigned (-1)) == 255)
+    assert "word8ToIntUnsigned (intToWord8 0) == 0" (word8ToIntUnsigned (intToWord8 0) == 0)
+    assert "word8ToIntUnsigned (intToWord8 127) == 127" (word8ToIntUnsigned (intToWord8 127) == 127)
+    assert "word8ToIntUnsigned (intToWord8 (-1)) == 255" (word8ToIntUnsigned (intToWord8 (-1)) == 255)
 
 verifyMemory :: IO ()
 verifyMemory = do
     -- SR Latch: Set=(1,0)->Q=1, Reset=(0,1)->Q=0, Hold=(0,0)
     let q0 = SrLatch Zero
-        qSet = update (One, Zero) q0
-        qHold = update (Zero, Zero) qSet
-        qReset = update (Zero, One) qHold
+        qSet = step (One, Zero) q0
+        qHold = step (Zero, Zero) qSet
+        qReset = step (Zero, One) qHold
     assert "SR Latch Set: S=1, R=0 -> Q=1" (qSet == SrLatch One)
     assert "SR Latch Hold: S=0, R=0 retains Q=1" (qHold == SrLatch One)
     assert "SR Latch Reset: S=0, R=1 -> Q=0" (qReset == SrLatch Zero)
 
     -- D Flip-Flop: Clock=0 holds state, Clock=1 samples D
     let dff0 = DFlipFlop Zero
-        dffIgnored = update (One, Zero) dff0
-        dffSampled = update (One, One) dff0
-        dffHeld    = update (Zero, Zero) dffSampled
+        dffIgnored = step (One, Zero) dff0
+        dffSampled = step (One, One) dff0
+        dffHeld    = step (Zero, Zero) dffSampled
     assert "D Flip-Flop: Clock=0 ignores Data" (dffIgnored == DFlipFlop Zero)
     assert "D Flip-Flop: Clock=1 samples Data" (dffSampled == DFlipFlop One)
     assert "D Flip-Flop: Clock=0 retains sampled Data" (dffHeld == DFlipFlop One)
 
     -- Register8
-    let reg0 = Register8 (int2byteSigned 0)
-        targetByte = int2byteSigned 42
-        regLatched = update (targetByte, One) reg0
-        regHeld    = update (int2byteSigned 99, Zero) regLatched
+    let reg0 = Register8 (intToWord8 0)
+        targetByte = intToWord8 42
+        regLatched = step (targetByte, One) reg0
+        regHeld    = step (intToWord8 99, Zero) regLatched
     assert "Register8: Latches 8-bit byte on Clock=1" (regLatched == Register8 targetByte)
     assert "Register8: Retains 8-bit byte on Clock=0" (regHeld == Register8 targetByte)
 
 verifyRippleCarry :: IO ()
 verifyRippleCarry = do
     -- Test all 256 * 256 = 65,536 combinations of unsigned addition
-    let allBytes = [ Byte [b0, b1, b2, b3, b4, b5, b6, b7]
+    let allBytes = [ Word8 b0 b1 b2 b3 b4 b5 b6 b7
                    | b0 <- [Zero, One], b1 <- [Zero, One], b2 <- [Zero, One], b3 <- [Zero, One]
                    , b4 <- [Zero, One], b5 <- [Zero, One], b6 <- [Zero, One], b7 <- [Zero, One]
                    ]
         testPair a b =
-            let valA = byteToIntUnsigned a
-                valB = byteToIntUnsigned b
+            let valA = word8ToIntUnsigned a
+                valB = word8ToIntUnsigned b
                 expected = (valA + valB) `mod` 256
-                actual = byteToIntUnsigned (add a b)
+                actual = word8ToIntUnsigned (add a b)
             in actual == expected
         allOk = and [ testPair a b | a <- allBytes, b <- allBytes ]
     assert "All 65,536 unsigned 8-bit addition combinations match (a + b) mod 256" allOk
 
     -- Subtraction: A - B == A + (-B) for sample range
-    let subOk = and [ byteToIntSigned (sub (int2byteSigned a) (int2byteSigned b)) ==
-                      byteToIntSigned (add (int2byteSigned a) (negateByte (int2byteSigned b)))
+    let subOk = and [ word8ToIntSigned (sub (intToWord8 a) (intToWord8 b)) ==
+                      word8ToIntSigned (add (intToWord8 a) (negateWord8 (intToWord8 b)))
                     | a <- [-50..50], b <- [-50..50]
                     ]
-    assert "Arithmetic: sub a b == add a (negateByte b) across 10,201 cases" subOk
+    assert "Arithmetic: sub a b == add a (negateWord8 b) across 10,201 cases" subOk
