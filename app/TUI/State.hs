@@ -7,6 +7,7 @@ module TUI.State
     , checkOverflow
     , getNumericValue
     , parseNumber
+    , inputInRange
     , syncFromStr
     , syncFromByte
     , setBitAt
@@ -46,7 +47,7 @@ data AppModel = AppModel
     , lastInputFrame :: Int
     , termW          :: Int
     , termH          :: Int
-    , logLines       :: [String]
+    , logLines       :: [(String, Int)]  -- ^ newest first, with repeat count
     , decayA         :: [Int]
     , decayB         :: [Int]
     , decayALU       :: [Int]
@@ -86,6 +87,13 @@ parseNumber raw =
               _         -> case readHex low of
                   [(n, "")] -> Just (if isNeg then -n else n)
                   _         -> Nothing
+
+-- | Whether a typed value fits the register. Decimal entry follows the
+-- arithmetic mode; hex/octal accept any 8-bit pattern.
+inputInRange :: AppMode -> DisplayBase -> Int -> Bool
+inputInRange UnsignedAdd Dec n = n >= 0 && n <= 255
+inputInRange SignedAdd   Dec n = n >= -128 && n <= 127
+inputInRange _           _   n = n >= -128 && n <= 255
 
 syncFromStr :: String -> Word8
 syncFromStr str = case parseNumber str of

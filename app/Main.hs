@@ -3,7 +3,7 @@ module Main where
 
 import System.IO (hSetEncoding, hSetBuffering, hSetEcho, stdout, stdin, utf8, BufferMode(..))
 import System.Exit (exitFailure)
-import Layoutz (runApp)
+import Layoutz (runAppWith, defaultAppOptions, AppOptions(..), AppAlignment(..))
 
 import TUI (logicSimApp, runPostSequence, runShutdownSequence, getInitialSize)
 
@@ -18,7 +18,7 @@ main = do
 
     let minW = 76
         minH = 24
-    
+
     if w < minW || h < minH
         then do
             putStrLn "\ESC[31mSYSTEM HALT: TERMINAL GEOMETRY EXCEPTION\ESC[0m"
@@ -35,11 +35,15 @@ main = do
             hSetBuffering stdout NoBuffering
             runPostSequence
 
-            hSetBuffering stdout (BlockBuffering Nothing)
-
-            runApp (logicSimApp w h)
+            -- Stay on the alt screen after the app exits so the shutdown
+            -- sequence doesn't clear the user's primary screen.
+            runAppWith defaultAppOptions
+                { optAlignment   = AppAlignCenter
+                , optClearOnExit = False
+                } (logicSimApp w h)
 
             hSetBuffering stdout NoBuffering
+            putStr "\ESC[?25l"
             runShutdownSequence
 
             putStr "\ESC[?7h"

@@ -67,24 +67,22 @@ handleAction action model = case action of
 
         in (model { frame = newF, decayA = newDecayA, decayB = newDecayB, decayALU = newDecayALU, aluDisplayBits = newAluDisplay }, CmdNone)
 
+    -- Tab stops: A value -> A switches -> B value -> B switches.
+    -- Arrow keys move between individual switches within a bank.
     CycleFocusForward ->
         let nextFocus = case focus model of
-                SwA 0 -> NumA
-                SwA i -> SwA (i - 1)
-                NumA  -> SwB 7
-                SwB 0 -> NumB
-                SwB i -> SwB (i - 1)
-                NumB  -> SwA 7
+                NumA  -> SwA 7
+                SwA _ -> NumB
+                NumB  -> SwB 7
+                SwB _ -> NumA
         in (model { focus = nextFocus }, CmdNone)
 
     CycleFocusBackward ->
         let prevFocus = case focus model of
-                NumA  -> SwA 0
-                SwA 7 -> NumB
-                SwA i -> SwA (i + 1)
-                NumB  -> SwB 0
-                SwB 7 -> NumA
-                SwB i -> SwB (i + 1)
+                NumA  -> SwB 7
+                SwA _ -> NumA
+                NumB  -> SwA 7
+                SwB _ -> NumB
         in (model { focus = prevFocus }, CmdNone)
 
     MoveCursor delta ->
@@ -100,7 +98,8 @@ handleAction action model = case action of
                        , strA = syncFromByte newMode (displayBase model) (byteA model)
                        , strB = syncFromByte newMode (displayBase model) (byteB model) 
                        }
-            logMsg = "> SYS CTRL: ARITHMETIC MODE SET TO " ++ show newMode
+            modeName = if newMode == SignedAdd then "SIGNED" else "UNSIGNED"
+            logMsg = "> SYS CTRL: ARITHMETIC MODE SET TO " ++ modeName
         in (recordActivity m' logMsg, CmdNone)
 
     ToggleBase ->
@@ -146,13 +145,20 @@ handleAction action model = case action of
             _    -> (model, CmdNone)
 
     TypeChar c ->
-        case focus model of
-            NumA -> let ns = strA model ++ [c] 
-                        m' = model { strA = ns, byteA = syncFromStr ns }
-                    in (recordActivity m' "> BUS INTERRUPT: REGISTER STATE ALTERED", CmdNone)
-            NumB -> let ns = strB model ++ [c] 
-                        m' = model { strB = ns, byteB = syncFromStr ns }
-                    in (recordActivity m' "> BUS INTERRUPT: REGISTER STATE ALTERED", CmdNone)
+        let -- A lone "0" is a placeholder: the first digit replaces it.
+            append str = if str == "0" && c /= 'x' && c /= 'o' then [c] else str ++ [c]
+            -- Reject keystrokes that don't parse or would leave the register's range,
+            -- so the display never disagrees with the stored byte.
+            accept ns = length ns <= 5 && maybe False (inputInRange (mode model) (displayBase model)) (parseNumber ns)
+        in case focus model of
+            NumA | accept (append (strA model)) ->
+                     let ns = append (strA model)
+                         m' = model { strA = ns, byteA = syncFromStr ns }
+                     in (recordActivity m' "> BUS INTERRUPT: REG A DATA ENTRY", CmdNone)
+            NumB | accept (append (strB model)) ->
+                     let ns = append (strB model)
+                         m' = model { strB = ns, byteB = syncFromStr ns }
+                     in (recordActivity m' "> BUS INTERRUPT: REG B DATA ENTRY", CmdNone)
             _    -> (model, CmdNone)
 
     Backspace ->
@@ -164,16 +170,18 @@ handleAction action model = case action of
                 _ -> model
         in (m', CmdNone)
 
+-- | Log an event (newest first, max 3), collapsing repeats into a count.
 recordActivity :: AppModel -> String -> AppModel
-recordActivity m msg = 
-    let newLog = take 3 (msg : logLines m)
+recordActivity m msg =
+    let newLog = case logLines m of
+            ((prev, n) : rest) | prev == msg -> (prev, n + 1) : rest
+            entries                          -> take 3 ((msg, 1) : entries)
     in m { lastInputFrame = frame m, logLines = newLog }
 
 handleSubs :: AppModel -> Sub AppAction
 handleSubs model = subBatch
     [ subKeyPress $ \key -> case key of
         KeyChar 'q'  -> Just Quit
-        KeyEscape    -> if showHelp model then Just ToggleHelp else Just Quit
         KeyChar '?'  -> Just ToggleHelp
         KeyChar '/'  | not isNumActive -> Just ToggleHelp
         KeyChar 'm'  | not isNumActive -> Just ToggleMode

@@ -14,52 +14,42 @@ module TUI.View
 import Layoutz
 import LogicSim.Core.Bit (Bit(..))
 import LogicSim.Core.Word8 (toList, fromListPadded)
+import LogicSim.Combinational.ALU (ALUOp(..), ALUFlags(..), ALUOutput(..), computeALU)
 
 import TUI.State
 
-renderBits :: Int -> [Bit] -> [Int] -> L
-renderBits currentF bits decays = tightRow $ map draw (reverse (zip bits decays))
+-- | Which colour channel an LED bank glows in.
+data LedTint = TintRed | TintGreen
+
+tint :: LedTint -> Int -> Color
+tint TintRed   v = ColorTrue v 0 0
+tint TintGreen v = ColorTrue 0 v 0
+
+-- | Pulsing LEDs; recently-lit ones fade out over a few frames.
+renderLeds :: LedTint -> Int -> [Bit] -> [Int] -> L
+renderLeds t currentF bits decays = tightRow $ map draw (reverse (zip bits decays))
   where
     pulse :: Double
     pulse = sin (fromIntegral currentF * 0.3)
-    rVal  :: Int
-    rVal  = round $ 177 + (78 * pulse)
+    lit   :: Int
+    lit   = round $ 177 + (78 * pulse)
+    frameCol = withColor (ColorTrue 60 60 60)
 
-    draw (One, _) = tightRow [ withColor (ColorTrue 60 60 60) (text " [")
-                             , withStyle StyleBold $ withColor (ColorTrue rVal 0 0) (text "O")
-                             , withColor (ColorTrue 60 60 60) (text "] ")
-                             ]
-    draw (Zero, lastOnF) =
-        let diff = currentF - lastOnF
-            ghostCol = if diff <= 1 then ColorTrue 140 0 0
-                       else if diff == 2 then ColorTrue 90 0 0
-                       else ColorTrue 40 0 0
-        in tightRow [ withColor (ColorTrue 60 60 60) (text " [")
-                    , withColor ghostCol (text "O")
-                    , withColor (ColorTrue 60 60 60) (text "] ")
-                    ]
+    draw (bit, lastOnF) =
+        let led = case bit of
+                One  -> withStyle StyleBold $ withColor (tint t lit) (text "O")
+                Zero -> let diff = currentF - lastOnF
+                            v | diff <= 1 = 140
+                              | diff == 2 = 90
+                              | otherwise = 40
+                        in withColor (tint t v) (text "O")
+        in tightRow [ frameCol (text " ["), led, frameCol (text "] ") ]
+
+renderBits :: Int -> [Bit] -> [Int] -> L
+renderBits = renderLeds TintRed
 
 renderAluBits :: Int -> [Bit] -> [Int] -> L
-renderAluBits currentF bits decays = tightRow $ map draw (reverse (zip bits decays))
-  where
-    pulse :: Double
-    pulse = sin (fromIntegral currentF * 0.3)
-    gVal  :: Int
-    gVal  = round $ 177 + (78 * pulse)
-
-    draw (One, _) = tightRow [ withColor (ColorTrue 60 60 60) (text " [")
-                             , withStyle StyleBold $ withColor (ColorTrue 0 gVal 0) (text "O")
-                             , withColor (ColorTrue 60 60 60) (text "] ")
-                             ]
-    draw (Zero, lastOnF) =
-        let diff = currentF - lastOnF
-            ghostCol = if diff <= 1 then ColorTrue 0 140 0
-                       else if diff == 2 then ColorTrue 0 90 0
-                       else ColorTrue 0 40 0
-        in tightRow [ withColor (ColorTrue 60 60 60) (text " [")
-                    , withColor ghostCol (text "O")
-                    , withColor (ColorTrue 60 60 60) (text "] ")
-                    ]
+renderAluBits = renderLeds TintGreen
 
 renderSwitches :: Focus -> String -> [Bit] -> L
 renderSwitches foc target bits =
@@ -75,28 +65,30 @@ renderSwitches foc target bits =
             swChar   = if activeIdx == i then withStyle StyleBold $ withColor ColorBrightWhite (text char) else withColor col (text char)
         in tightRow [lBracket, swChar, rBracket]
 
-renderDigitalDisplay :: Int -> Bool -> String -> L -> [L]
-renderDigitalDisplay currentF isFocused str appendRight =
+-- | Three-row seven-segment readout. @side@ supplies up to three widgets
+-- drawn to the right of the digits, one per row.
+renderDigitalDisplay :: Int -> Bool -> String -> [L] -> [L]
+renderDigitalDisplay currentF isFocused str side =
     let safeStr = if null str then " " else str
         cursorChar = if isFocused && (currentF `mod` 10 < 5) then "_" else " "
         displayStr = safeStr ++ cursorChar
-        
-        padded = replicate (max 0 (5 - length displayStr)) ' ' ++ displayStr
+
+        padded = replicate (max 0 (6 - length displayStr)) ' ' ++ displayStr
         matrices = map largeDigit padded
 
         getRow i m = if length m > i then m !! i else "   "
-
-        row1 = unwords (map (getRow 0) matrices)
-        row2 = unwords (map (getRow 1) matrices)
-        row3 = unwords (map (getRow 2) matrices)
+        rowStr i = unwords (map (getRow i) matrices)
 
         col = if isFocused then ColorTrue 255 176 0 else ColorTrue 150 100 0
-        
-        formatRow r ext = tightRow [ text "                         ", withStyle StyleBold $ withColor col $ text r, text "   ", ext ]
-    in [ formatRow row1 (text " ")
-       , formatRow row2 appendRight
-       , formatRow row3 (text " ")
-       ]
+        sides = side ++ repeat (text " ")
+
+        formatRow i ext = tightRow
+            [ text (replicate 21 ' ')
+            , withStyle StyleBold $ withColor col $ text (rowStr i)
+            , text "   "
+            , ext
+            ]
+    in zipWith formatRow [0, 1, 2] sides
 
 renderModeSwitch :: AppMode -> L
 renderModeSwitch m = 
@@ -113,16 +105,22 @@ renderModeSwitch m =
         lLev = withColor ColorBrightWhite (text lever)
     in tightRow [ padding, lU, lLev, lS ]
 
-renderStatusBar :: Focus -> DisplayBase -> L
-renderStatusBar foc base =
+renderStatusBar :: Focus -> AppMode -> DisplayBase -> L
+renderStatusBar foc m base =
     let targetInfo = case foc of
             NumA   -> "REG A [ NUMERIC ENTRY ]"
             SwA i  -> "REG A [ SWITCH BIT " ++ show i ++ " ]"
             NumB   -> "REG B [ NUMERIC ENTRY ]"
             SwB i  -> "REG B [ SWITCH BIT " ++ show i ++ " ]"
-        baseInfo = "BASE [ " ++ show base ++ " ]"
+        modeInfo = case m of
+            UnsignedAdd -> "UNSIGNED"
+            SignedAdd   -> "SIGNED"
+        baseInfo = case base of
+            Dec -> "DEC"
+            Hex -> "HEX"
+            Oct -> "OCT"
     in tightRow [ text "    ", withColor (ColorTrue 0 150 150) $ text $
-       "STATUS: " ++ targetInfo ++ " | " ++ baseInfo ]
+       "STATUS: " ++ targetInfo ++ " | " ++ modeInfo ++ " | BASE [ " ++ baseInfo ++ " ]" ]
 
 renderSystemLights :: Int -> Int -> L
 renderSystemLights currentF lastF =
@@ -142,6 +140,53 @@ renderSystemLights currentF lastF =
         
     in tightRow [ pwrCol, text "  ", actCol, clkCol ]
 
+-- | Status lamp: bold and bright when lit, a dark ember of the same hue when not.
+lamp :: (Int, Int, Int) -> Bool -> String -> L
+lamp (r, g, b) on label
+    | on        = withStyle StyleBold $ withColor (ColorTrue r g b) (text ("● " ++ label))
+    | otherwise = withColor (ColorTrue (r `div` 5) (g `div` 5) (b `div` 5)) (text ("● " ++ label))
+
+padTo :: Int -> L -> L
+padTo n l = tightRow [ l, text (replicate (max 0 (n - width l)) ' ') ]
+
+-- | ALU status flags from the gate-level ALU. They only light once the ripple
+-- animation has settled on the final sum, like a latched status register.
+data FlagLamps = FlagLamps { lampC, lampZ, lampN, lampV :: L }
+
+aluFlagLamps :: AppModel -> FlagLamps
+aluFlagLamps model =
+    let ALUOutput res fl = computeALU OpAdd (byteA model) (byteB model)
+        settled = toList res == aluDisplayBits model
+        on f    = settled && f == One
+        ovf     = case mode model of
+            UnsignedAdd -> flagCarry fl
+            SignedAdd   -> flagOverflow fl
+        amber   = (255, 176, 0)
+    in FlagLamps
+        { lampC = lamp amber        (on (flagCarry fl))    "CARRY"
+        , lampZ = lamp amber        (on (flagZero fl))     "ZERO"
+        , lampN = lamp amber        (on (flagNegative fl)) "NEG"
+        , lampV = lamp (255, 40, 40) (on ovf)              "OVF"
+        }
+
+-- | One-cell frameMargin around an element. Replaces layoutz's 'pad', which
+-- measures lines with raw 'length' (ANSI codes included) and so right-pads
+-- every coloured line with hundreds of spaces, bloating each frame ~5x.
+frameMargin :: L -> L
+frameMargin x = layout [ text " ", tightRow [ text " ", x ], text " " ]
+
+-- | Footer key legend: bright keys, dim descriptions.
+renderKeyHints :: [(String, String)] -> L
+renderKeyHints hints =
+    tightRow $ text " " : concatMap hint hints
+  where
+    -- note: layoutz crashes on `text ""`, so every piece here is non-empty
+    hint (k, d) =
+        [ text " "
+        , withStyle StyleBold $ withColor (ColorTrue 255 176 0) (text k)
+        , withColor (ColorTrue 130 130 130) (text (' ' : d ++ " "))
+        ]
+
 renderHelpView :: AppModel -> L
 renderHelpView _ =
     let w = 72
@@ -152,17 +197,17 @@ renderHelpView _ =
         val s = withColor (ColorTrue 255 176 0) $ text s
         item k d = tightRow [ text "   ", val k, text (replicate (max 1 (22 - length k)) ' '), dim d ]
     in layout
-    [ pad 1 $ withBorder BorderDouble $ box " (+) ≡≡ VECTRONIX SYSTEMS : MAINFRAME MANUAL [?] ≡≡ (+) "
+    [ frameMargin $ withBorder BorderDouble $ box " (+) ≡≡ VECTRONIX SYSTEMS : MAINFRAME MANUAL [?] ≡≡ (+) "
         [ thinDivider
         , sec " [ KEYBOARD CONTROLS ]"
-        , item "[Tab] / [b]" "Cycle focus forward / backward"
-        , item "[Left] / [Right]" "Move switch cursor (Bit 7 <-> Bit 0)"
-        , item "[Up] / [Down]" "Adjust numeric value / Switch Reg A <-> B"
-        , item "[Space]" "Toggle currently selected hardware switch"
-        , item "[m]" "Toggle mode: Unsigned (0..255) <-> Signed (-128..127)"
-        , item "[h]" "Cycle display base: Decimal -> Hexadecimal -> Octal"
-        , item "[?] or [/]" "Toggle this Help & Circuit Manual overlay"
-        , item "[q] or [ESC]" "Safely power down system and quit"
+        , item "[Tab] / [b]" "Next / previous field (value, switches)"
+        , item "[Left] / [Right]" "Move switch cursor within a bank"
+        , item "[Up] / [Down]" "Adjust value / jump between Reg A <-> B"
+        , item "[Space]" "Toggle the selected hardware switch"
+        , item "[m]" "Mode: unsigned 0..255 <-> signed -128..127"
+        , item "[h]" "Cycle display base: Dec -> Hex -> Oct"
+        , item "[?] or [/]" "Toggle this manual"
+        , item "[q] or [ESC]" "Power down and quit"
         , text " "
         , thinDivider
         , sec " [ HARDWARE LOGIC GATES (NAND-Derived First Principles) ]"
@@ -177,10 +222,11 @@ renderHelpView _ =
         , tightRow [ text "   ", dim "               Cout = (A AND B) OR (Cin AND (A XOR B))" ]
         , tightRow [ text "   ", dim "* Ripple-Carry: 8-bit chained adder propagating C0..C7" ]
         , tightRow [ text "   ", dim "* Accumulator : Dynamic LED array with simulated RC bus decay" ]
+        , tightRow [ text "   ", dim "* Flags       : CARRY out, ZERO, NEG (bit 7), OVF (per mode)" ]
         , thinDivider
-        , tightRow [ text "   ", header "Press [?] or [ESC] to return to Front Panel" ]
+        , tightRow [ text "   ", header "Press [?] to return to the Front Panel" ]
         ]
-    , withStyle StyleBold $ withColor ColorBrightWhite $ text "  [?] Close Manual | [q] Quit"
+    , renderKeyHints [("?", "close manual"), ("q", "quit")]
     ]
 
 renderView :: AppModel -> L
@@ -189,14 +235,14 @@ renderView model
     | otherwise =
         let bitsA = toList (byteA model)
             bitsB = toList (byteB model)
-            isOV = checkOverflow (mode model) (byteA model) (byteB model)
             isCompact = termH model < 38
+            flags = aluFlagLamps model
 
             w = 72
             centerTxt s = let p = max 0 (w - length s) `div` 2 in replicate p ' ' ++ s ++ replicate (w - length s - p) ' '
 
             thickDivider = withColor (ColorTrue 50 50 50) $ text (replicate w '▓')
-            
+
             busDivider label =
                 let str = "[ " ++ label ++ " ]"
                     remLen = max 0 (w - length str)
@@ -204,79 +250,101 @@ renderView model
                     rightChars = replicate (remLen - (remLen `div` 2)) '═'
                 in withColor (ColorTrue 80 80 80) $ text (leftChars ++ str ++ rightChars)
 
-            renderHeader title =
-                let titleSpacing = "  " ++ title ++ "  "
+            -- The focused register's header lights up amber.
+            renderHeader' active title =
+                let titleSpacing = (if active then " ▶ " else "  ") ++ title ++ "  "
                     leftBlocks = "███"
                     rightLen = max 0 (w - length titleSpacing - length leftBlocks)
                     rightBlocks = replicate rightLen '█'
+                    titleCol = if active then ColorTrue 255 176 0 else ColorBrightWhite
                 in tightRow
                    [ withColor (ColorTrue 50 50 50) $ text leftBlocks
-                   , withStyle StyleBold $ withColor ColorBrightWhite $ text titleSpacing
+                   , withStyle StyleBold $ withColor titleCol $ text titleSpacing
                    , withColor (ColorTrue 50 50 50) $ text rightBlocks
                    ]
-
-            ovfLight = if isOV then withStyle StyleBold $ withColor (ColorTrue 255 0 0) (text "● OVF") else withColor (ColorTrue 40 0 0) (text "● OVF")
+            renderHeader = renderHeader' False
+            focusOnA = case focus model of { NumA -> True; SwA _ -> True; _ -> False }
+            focusOnB = case focus model of { NumB -> True; SwB _ -> True; _ -> False }
 
             renderCompactVal isFocused valStr ext =
                 let col = if isFocused then ColorTrue 255 176 0 else ColorTrue 180 140 0
                     cursorChar = if isFocused && (frame model `mod` 10 < 5) then "_" else " "
-                in [ tightRow 
+                in [ tightRow
                        [ text "                "
                        , withColor (ColorTrue 130 130 130) (text "VALUE: [ ")
                        , withStyle StyleBold $ withColor col (text (valStr ++ cursorChar))
                        , withColor (ColorTrue 130 130 130) (text " ]")
-                       , text "    "
+                       , text (replicate (max 1 (10 - length valStr)) ' ')
                        , ext
                        ]
                    ]
 
             displayA = if isCompact
                        then renderCompactVal (focus model == NumA) (strA model) (text " ")
-                       else renderDigitalDisplay (frame model) (focus model == NumA) (strA model) (text " ")
+                       else renderDigitalDisplay (frame model) (focus model == NumA) (strA model) []
             displayB = if isCompact
                        then renderCompactVal (focus model == NumB) (strB model) (text " ")
-                       else renderDigitalDisplay (frame model) (focus model == NumB) (strB model) (text " ")
+                       else renderDigitalDisplay (frame model) (focus model == NumB) (strB model) []
             aluWord = fromListPadded (aluDisplayBits model)
             aluValStr = formatValue (displayBase model) (getNumericValue (mode model) aluWord)
             displayALU = if isCompact
-                         then renderCompactVal False aluValStr ovfLight
-                         else renderDigitalDisplay (frame model) False aluValStr ovfLight
+                         then renderCompactVal False aluValStr $ tightRow
+                                [ lampC flags, text "  ", lampZ flags, text "  ", lampN flags, text "  ", lampV flags ]
+                         else renderDigitalDisplay (frame model) False aluValStr
+                                [ tightRow [ padTo 10 (lampC flags), lampZ flags ]
+                                , tightRow [ padTo 10 (lampN flags), lampV flags ]
+                                ]
 
             spacingLines = if isCompact then [] else [text " "]
+            -- Compact mode must fit 24 rows (the runtime ends every line,
+            -- including the last, with a newline), so drop the dividers there.
+            sectionBreak = if isCompact then [] else [thickDivider]
             logLinesCount = if isCompact then 1 else 3
-            linesToRender = if null (logLines model)
-                            then ["> SYSTEM AWAITING INPUT..."]
-                            else take logLinesCount (reverse (logLines model))
+            -- logLines is newest-first: keep the newest N, print oldest at top.
+            shownLog = reverse (take logLinesCount (logLines model))
+            logShade age = case age of
+                0 -> ColorTrue 0 200 0
+                1 -> ColorTrue 0 130 0
+                _ -> ColorTrue 0 80 0
+            renderLogLine (age, (msg, n)) = tightRow $
+                [ text "    "
+                , withColor (logShade age) (text msg)
+                ] ++ [ withColor (ColorTrue 0 90 0) (text ("  (x" ++ show n ++ ")")) | n > 1 ]
+            logView = if null shownLog
+                      then [ tightRow [ text "    ", withColor (ColorTrue 0 100 0) (text "> SYSTEM AWAITING INPUT...") ] ]
+                      else map renderLogLine (zip [length shownLog - 1, length shownLog - 2 .. 0] shownLog)
 
             boxContent =
                 [ tightRow [ text "   ", renderSystemLights (frame model) (lastInputFrame model) ]
-                , text $ centerTxt "MODE SELECTOR"
+                , withColor (ColorTrue 130 130 130) $ text $ centerTxt "MODE SELECTOR"
                 , renderModeSwitch (mode model)
                 ] ++ spacingLines ++
                 [ busDivider "I/O DATA BUS"
-                , renderHeader "REGISTER A"
+                , renderHeader' focusOnA "REGISTER A"
                 , tightRow [ text "                ", renderBits (frame model) bitsA (decayA model) ]
                 , tightRow [ text "                ", renderSwitches (focus model) "A" bitsA ]
                 ] ++ displayA ++
-                [ thickDivider
-                , renderHeader "REGISTER B"
+                sectionBreak ++
+                [ renderHeader' focusOnB "REGISTER B"
                 , tightRow [ text "                ", renderBits (frame model) bitsB (decayB model) ]
                 , tightRow [ text "                ", renderSwitches (focus model) "B" bitsB ]
                 ] ++ displayB ++
-                [ thickDivider
-                , renderHeader "ALU ACCUMULATOR"
+                sectionBreak ++
+                [ renderHeader "ALU ACCUMULATOR"
                 , tightRow [ text "                ", renderAluBits (frame model) (aluDisplayBits model) (decayALU model) ]
                 ] ++ displayALU ++
                 spacingLines ++
                 [ busDivider "DIAGNOSTIC LOGIC BUS"
                 , renderHeader "SYSTEM LOG"
-                ] ++ map (\s -> tightRow [ text "    ", withColor (ColorTrue 0 100 0) (text s) ]) linesToRender ++
+                ] ++ logView ++
                 spacingLines ++
                 [ renderHeader "STATE MONITOR"
-                , renderStatusBar (focus model) (displayBase model)
+                , renderStatusBar (focus model) (mode model) (displayBase model)
                 ]
 
         in layout
-        [ (if isCompact then id else pad 1) $ withBorder BorderDouble $ box " (+) ≡≡ VECTRONIX SYSTEMS : MAINFRAME 2000 ≡≡ (+) " boxContent
-        , withStyle StyleBold $ withColor ColorBrightWhite $ text "  [Tab] Next | [Arrows] Navigate | [Space] Toggle | [m] Mode | [h] Base | [?] Help | [q] Quit"
+        [ (if isCompact then id else frameMargin) $ withBorder BorderDouble $ box " (+) ≡≡ VECTRONIX SYSTEMS : MAINFRAME 2000 ≡≡ (+) " boxContent
+        , renderKeyHints
+            [ ("Tab", "field"), ("←→", "bit"), ("Spc", "flip"), ("↑↓", "adjust")
+            , ("m", "mode"), ("h", "base"), ("?", "help"), ("q", "quit") ]
         ]
